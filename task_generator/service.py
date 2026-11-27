@@ -1,16 +1,17 @@
-import random
+from __future__ import annotations
+
 import json
 import os
+import random
 import time
+import unicodedata
+from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-import unicodedata
 from uuid import uuid4
-from typing import Protocol
 
-from planner.models.planner_input import CurriculumContext
 from planner.models.learning_plan import TaskAllocation
-
+from planner.models.planner_input import CurriculumContext
 from task_generator.models import (
     AnswerOption,
     PresentedOption,
@@ -20,10 +21,10 @@ from task_generator.models import (
 )
 from task_generator.quality import has_single_true_comparison, is_statement_well_formed
 
-
 GENERATOR_VERSION = "0.2.0"
 TASK_PROMPT_VERSION = "closed-task-stream-v2"
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
 RETRYABLE_GEMINI_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
@@ -127,11 +128,20 @@ class InMemoryPresentationKeyStore:
 class TaskGeneratorService:
     """Generate deterministic, machine-checkable single-choice math templates."""
 
-    def __init__(self, skill_navigator, rng=None, *, gemini_api_key="AQ.Ab8RN6LP_VAxrVm5rvWeM4seA9Biz5Yltvt-bWMVhjDTLKCGSg", gemini_model=None):
+    def __init__(
+        self,
+        skill_navigator,
+        rng=None,
+        *,
+        gemini_api_key: str | None = None,
+        gemini_model: str | None = None,
+    ):
         self.skill_navigator = skill_navigator
         self.rng = rng or random.SystemRandom()
-        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
-        self.gemini_model = (gemini_model or GEMINI_MODEL).removeprefix("models/")
+        env_key = os.getenv("GEMINI_API_KEY")
+        self.gemini_api_key = (gemini_api_key or env_key or "").strip() or None
+        raw_model = gemini_model or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
+        self.gemini_model = raw_model.removeprefix("models/")
         get_skills = getattr(skill_navigator, "get_skills", None)
         self.skills = {
             skill["id"]: skill for skill in (get_skills() if get_skills else [])
@@ -280,7 +290,6 @@ class TaskGeneratorService:
                 "równoważnych poprawnej odpowiedzi, np. >= jako dystraktora dla >. "
                 "nie powtarzaj treści ani zestawów liczb w paczce. Przykładowa forma: "
                 "Zamień podany ułamek na liczbę mieszaną. Dobierz konkretne dane do skillu."
-
             ),
             "skill_guidelines": [self.skills[value] for value in skill_ids],
             "primary_skill_id": skill_id,
@@ -313,7 +322,6 @@ class TaskGeneratorService:
         buffer = ""
         cursor = 0
         emitted = 0
-        array_closed = False
         try:
             with _urlopen_with_retries(http_request, timeout=60) as response:
                 for raw_line in response:
@@ -330,7 +338,7 @@ class TaskGeneratorService:
                             if isinstance(part.get("text"), str):
                                 fragments.append(part["text"])
                     buffer += "".join(fragments)
-                    decoded, cursor, array_closed = _extract_json_array_items(buffer, cursor)
+                    decoded, cursor, _ = _extract_json_array_items(buffer, cursor)
                     for result in decoded:
                         if emitted >= task_count:
                             raise TaskGenerationError("gemini_generation_failed", "Gemini returned more tasks than requested.")
@@ -601,7 +609,6 @@ class TaskGeneratorService:
         ]
 
 
-
 class TaskPresentationService:
     """Create randomized learner views while keeping the answer key server-side."""
 
@@ -701,6 +708,4 @@ class TaskPresentationService:
 
 def _normalize(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", value.casefold())
-    return "".join(char for char in decomposed if not unicodedata.combining(char))
-
-
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).strip()
