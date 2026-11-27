@@ -1,3 +1,4 @@
+import re
 import unicodedata
 
 from planner.models.planner_input import CurriculumContext
@@ -6,8 +7,12 @@ from profiler.models.student_profile import StudentProfile
 
 
 def _normalize(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", value.casefold())
-    return "".join(char for char in decomposed if not unicodedata.combining(char))
+    decomposed = unicodedata.normalize("NFKD", str(value).casefold())
+    without_diacritics = "".join(
+        char for char in decomposed if not unicodedata.combining(char)
+    ).replace("\u0142", "l")
+    cleaned = re.sub(r"\.json$", "", without_diacritics.strip())
+    return re.sub(r"^\d+[-_]+", "", cleaned)
 
 
 def _canonical_stage(value: str) -> str:
@@ -37,7 +42,9 @@ def _canonical_domain(value: str) -> str:
         "ulamki": "fractions",
         "ulamkow": "fractions",
         "fraction": "fractions",
+        "fractions": "fractions",
         "arytmetyka": "arithmetic",
+        "arithmetic": "arithmetic",
     }
     return aliases.get(normalized, normalized)
 
@@ -67,6 +74,15 @@ class TargetSkillSelector:
             and self._matches_context(skill, context)
         ]
         if not candidates:
+            candidates = [
+                skill
+                for skill in skills
+                if any(
+                    _canonical_domain(tag) == domain_key
+                    for tag in skill.get("tags", [])
+                )
+            ]
+        if not candidates:
             return None
 
         by_id = {skill["id"]: skill for skill in skills}
@@ -77,11 +93,15 @@ class TargetSkillSelector:
                 return depths[skill_id]
             visiting = set() if visiting is None else visiting
             if skill_id in visiting:
-                raise ValueError("Cycle in skill prerequisites")
+                return 0
             visiting.add(skill_id)
             prerequisites = by_id.get(skill_id, {}).get("prerequisites", [])
             depth = (
-                1 + max(dependency_depth(item, visiting.copy()) for item in prerequisites)
+                1
+                + max(
+                    (dependency_depth(item, visiting.copy()) for item in prerequisites if item in by_id),
+                    default=0,
+                )
                 if prerequisites
                 else 0
             )
@@ -109,7 +129,7 @@ class TargetSkillSelector:
             if mastery < 0.7:
                 return skill["id"]
 
-        return None
+        return ordered[0]["id"]
 
     def select_review_skill(
         self,
