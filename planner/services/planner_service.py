@@ -1,11 +1,13 @@
+import re
+import unicodedata
 import uuid
 from planner.models.planner_input import PlannerInput
-from planner.models.learning_plan import LearningPlan, PlanStatus
-from planner.models.learning_plan import PlanItem, TaskAllocation
+from planner.models.learning_plan import LearningPlan, PlanItem, TaskAllocation
 from planner.core.readiness_evaluator import ReadinessEvaluator
 from planner.core.difficulty_selector import DifficultySelector
 from planner.core.planning_policy import PlanningPolicy
 from planner.core.target_skill_selector import TargetSkillSelector
+
 
 class PlannerService:
     def __init__(
@@ -57,16 +59,25 @@ class PlannerService:
                 context=planner_input.curriculum_context,
             )
             if target_id is None:
-                return LearningPlan(
-                    plan_id=str(uuid.uuid4()),
-                    target_skill_id="",
-                    items=[],
-                    status="blocked",
-                    reason=(
-                        f"Brak nieopanowanych umiejętności w dziale "
-                        f"'{planner_input.selected_domain}' dla wybranego kontekstu programu."
-                    ),
+                # Awaryjny fallback: weź pierwszy skill z działu jeśli istnieje
+                domain_fallback = self._skills_in_domain(
+                    planner_input.selected_domain,
+                    skills,
+                    planner_input.curriculum_context,
                 )
+                if domain_fallback:
+                    target_id = domain_fallback[0]["id"]
+                else:
+                    return LearningPlan(
+                        plan_id=str(uuid.uuid4()),
+                        target_skill_id="",
+                        items=[],
+                        status="blocked",
+                        reason=(
+                            f"Brak nieopanowanych umiejętności w dziale "
+                            f"'{planner_input.selected_domain}' dla wybranego kontekstu programu."
+                        ),
+                    )
 
         effective_input = planner_input.model_copy(
             update={"target_skill_id": target_id, "selected_domain": None}
@@ -178,8 +189,6 @@ class PlannerService:
                     f"ją z umiejętnością {target_id}."
                 )
 
-        # Krok 4: Określenie statusu całego planu
-        # Krok 5: Zwrócenie kompletnego planu nauki z unikalnym ID
         return LearningPlan(
             plan_id=str(uuid.uuid4()),
             target_skill_id=target_id,
@@ -239,11 +248,23 @@ class PlannerService:
 
     def _skills_in_domain(self, domain, skills, context):
         domain_key = self._normalize_domain(domain)
-        return [
+        matched = [
             skill
             for skill in skills
             if self.target_skill_selector._matches_context(skill, context)
             and any(
+                self._normalize_domain(tag) == domain_key
+                for tag in skill.get("tags", [])
+            )
+        ]
+        if matched:
+            return matched
+
+        # Fallback: dopasuj po samym dziale jeśli filtr kontekstu nie zwrócił żadnego skilla
+        return [
+            skill
+            for skill in skills
+            if any(
                 self._normalize_domain(tag) == domain_key
                 for tag in skill.get("tags", [])
             )
@@ -304,10 +325,22 @@ class PlannerService:
 
     @staticmethod
     def _normalize_domain(value):
+        if not value:
+            return ""
+        decomposed = unicodedata.normalize("NFKD", str(value).casefold())
+        without_diacritics = "".join(
+            char for char in decomposed if not unicodedata.combining(char)
+        ).replace("\u0142", "l")
+        # Usuń rozszerzenie .json oraz wiodący prefiks typu "01-" / "02_"
+        cleaned = re.sub(r"\.json$", "", without_diacritics.strip())
+        cleaned = re.sub(r"^\d+[-_]+", "", cleaned)
+
         aliases = {
             "ulamki": "fractions",
             "ulamkow": "fractions",
             "fraction": "fractions",
+            "fractions": "fractions",
+            "arytmetyka": "arithmetic",
+            "arithmetic": "arithmetic",
         }
-        normalized = value.casefold().replace("\u0142", "l")
-        return aliases.get(normalized, normalized)
+        return aliases.get(cleaned, cleaned)
